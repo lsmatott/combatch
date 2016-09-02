@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# =====================================================
+# combatch = COMSOL Server Batch Automation
+#
+# This file contains configuration variables for the 
+# combatch script. It is sources by the combatch command.
+# Match to your system or leave blank.
+# 
+#   COMBATCH_CSL_ROOT_DIR = the path to the root CSL 
+#   installation  area. Each user is assumed to have their 
+#   own installation as a subdir of this directory.
+#
+#   COMBATCH_CSL_VERSION = the version of CSL that combatch
+#   will use.
+#
+#   COMBATCH_JAVA_OPTIONS = additional java options that
+#   will be added to the "_JAVA_OPTIONS" variable.
+# 
+# =====================================================
+
+# CSL settings
+# CSL installation = $COMBATCH_CSL_ROOT_DIR/user/$COMBATCH_CSL_VERSION
+export COMBATCH_CSL_ROOT_DIR=/projects
+export COMBATCH_FIREFOX_DIR=/path/to/firefox/installation
+export COMBATCH_JAVA_OPTIONS=""
+export COMBATCH_CSL_VERSION=COMSOL52
+
+#default cluster settings
+export COMBATCH_DEFAULT_CLUSTER=tux
+export COMBATCH_DEFAULT_PARTITION=compute
+export COMBATCH_DEFAULT_MEM=3000
+export COMBATCH_DEFAULT_TPN=8
+export COMBATCH_DEFAULT_NODES=2
+export COMBATCH_DEFAULT_CONSTRAINT=IB
+export COMBATCH_DEFAULT_WALLTIME=72:00:00
+export COMBATCH_PROJECT_LIST="group1 group2"
+export COMBATCH_DEBUG_CLUSTER=debug
+export COMBATCH_DEBUG_PARTITION=debug
+export COMBATCH_MAX_WALLTIME=72h
+export COMBATCH_DEFAULT_PORT=2036
+

@@ -1,0 +1,331 @@
+#!/bin/bash
+
+# determine combatch install location
+# Copied from Apache Ant:
+# https://git-wip-us.apache.org/repos/asf?p=ant.git;a=blob;f=src/script/ant;h=b5ed5be6a8fe3a08d26dea53ea0fb3f5fab45e3f
+if [ -z "$COMBATCH_HOME" -o ! -d "$COMBATCH_HOME" ] ; then
+  ## resolve links - $0 may be a link to combatch's home
+  PRG="$0"
+  progname=`basename "$0"`
+
+  # need this for relative symlinks
+  while [ -h "$PRG" ] ; do
+    ls=`ls -ld "$PRG"`
+    link=`expr "$ls" : '.*-> \(.*\)$'`
+    if expr "$link" : '/.*' > /dev/null; then
+    PRG="$link"
+    else
+    PRG=`dirname "$PRG"`"/$link"
+    fi
+  done
+
+  COMBATCH_HOME=`dirname "$PRG"`/..
+
+  # make it fully qualified
+  COMBATCH_HOME=`cd "$COMBATCH_HOME" > /dev/null && pwd`
+fi
+
+if [ "$1" == "--help" ]; then
+  echo ""
+  echo "======================================================================="
+  echo "Usage:"
+  echo "  combatch [args]"
+  echo ""
+  echo "Description:"
+  echo "  This script automates the running of COMSOL CSL apps on a distributed"
+  echo "  computing cluster that is managed using SLURM."
+  echo " "
+  echo "Arguments can be provided in any order and use a --variable=value "
+  echo "syntax. Valid variable names are given below and most should be familiar to"
+  echo "users of the sbatch command:"
+  echo "  --clusters, --partition, --mem, --tasks-per-node, --nodes, "
+  echo "  --constraint, --time, --account, and --port"
+  echo "======================================================================="
+  echo " "
+  exit
+fi
+
+# make sure configration file is present
+if [ ! -f $COMBATCH_HOME/conf/combatch ]; then
+  echo ""
+  echo "  combatch configuration file is missing!"
+  echo ""
+  echo "  Plesae create a file named:"
+  echo "     $COMBATCH_HOME/conf/combatch"
+  echo ""
+  echo "  You may use the following as a template:"
+  echo "     $COMBATCH_HOME/conf/combatch.sample"
+  echo ""
+  exit
+fi
+
+# setup combatch environment
+. $COMBATCH_HOME/conf/combatch 
+
+# setup CSL environment
+user=`whoami`
+export COMSOL=$COMBATCH_CSL_ROOT_DIR/$user/$COMBATCH_CSL_VERSION
+export PATH=$COMSOL/bin:$COMSOL/license/glnxa64:$COMBATCH_FIREFOX_DIR:$PATH
+export _JAVA_OPTIONS="$COMBATCH_JAVA_OPTIONS $_JAVA_OPTIONS"
+
+# check if modules are available
+bIsLmod=`which lmod 2>/dev/null | wc -l`
+if [ "$bIsLmod" == "1" ]; then
+  # check if stubl is installed
+  bIsStubl=`module avail stubl 2>&1 | grep stubl | wc -l`
+  if [ "$bIsStubl" == "1" ]; then
+    module load stubl
+  fi
+fi
+STIMES=`which stimes 2>/dev/null`
+
+# set environment variable for passing cluster information to COMSOL cluster compute settings
+export COMBATCH_VARS_FILE=`pwd`/combatch_vars.$$
+
+# process arguments
+cluster=`echo $@ | tr ' ' '\n' | grep "\--clusters" | cut -d= -f2`
+if [ "$cluster" == "" ]; then
+  cluster=$COMBATCH_DEFAULT_CLUSTER
+fi
+
+part=`echo $@ | tr ' ' '\n' | grep "\--partition" | cut -d= -f2`
+if [ "$part" == "" ]; then
+  part=$COMBATCH_DEFAULT_PARTITION
+fi
+
+memory=`echo $@ | tr ' ' '\n' | grep "\--mem" | cut -d= -f2`
+if [ "$memory" == "" ]; then
+  memory=$COMBATCH_DEFAULT_MEM
+fi
+
+tpn=`echo $@ | tr ' ' '\n' | grep "\--tasks-per-node" | cut -d= -f2`
+if [ "$tpn" == "" ]; then
+  tpn=$COMBATCH_DEFAULT_TPN
+fi
+
+nodes=`echo $@ | tr ' ' '\n' | grep "\--nodes" | cut -d= -f2`
+if [ "$nodes" == "" ]; then
+  nodes=$COMBATCH_DEFAULT_NODES
+fi
+
+constraint=`echo $@ | tr ' ' '\n' | grep "\--constraint" | cut -d= -f2`
+if [ "$constraint" == "" ]; then
+  constraint=$COMBATCH_DEFAULT_CONSTRAINT
+fi
+
+walltime=`echo $@ | tr ' ' '\n' | grep "\--time" | cut -d= -f2`
+if [ "$walltime" == "" ]; then
+  walltime=$COMBATCH_DEFAULT_WALLTIME
+fi
+
+proj=`echo $@ | tr ' ' '\n' | grep "\--account" | cut -d= -f2`
+bProjIsValid=0
+for p in $COMBATCH_PROJECT_LIST; do
+  if [ "$p" == "$proj" ]; then
+     bProjIsValid=1
+     break
+  fi
+done
+
+# throw an error if the account is not valid
+if [ "$bProjIsValid" != "1" ]; then
+  if [ "$cluster" != "$COMBATCH_DEBUG_CLUSTER" -o "$part" != "$COMBATCH_DEBUG_PARTITION" ]; then
+    echo "You must specify a valid project account for non-debug sessions."
+    echo "Options are --account=:"
+    for p in $COMBATCH_PROJECT_LIST; do
+      echo "    $p"
+    done
+    exit
+  fi
+fi
+
+# let user specify an assumed port to avoid waiting for an assignment
+port=`echo $@ | tr ' ' '\n' | grep "\--port" | cut -d= -f2`
+
+nprocs=`expr $nodes \* $tpn`
+
+# request compute nodes
+workdir=`pwd`
+echo "Requesting batch compute nodes ..."
+echo "Nodes          = $nodes"
+echo "Procs per Node = $tpn"
+echo "Num Processors = $nprocs"
+echo "RAM per Node   = $memory MB"
+echo "Cluster        = $cluster"
+echo "Partition      = $part"
+echo "Constraint     = $constraint"
+echo "Working Dir    = $workdir"
+
+jobId=`sbatch --account=$proj --time=$walltime --nodes=$nodes --tasks-per-node=$tpn --mem=$memory --clusters=$cluster --partition=$part --constraint=$constraint --wrap="sleep $COMBATCH_MAX_WALLTIME" | awk '{ print $4 }'`
+
+if [ "$jobId" == "" ]; then
+  echo "Failed to request compute nodes - aborting script!"
+  exit
+fi
+
+# wait for job to start running
+nsleeps=0
+echo ""
+echo "Waiting for job ($jobId) to start ..."
+bRunning=0
+while [ "$bRunning" == "0" ]; do
+  bRunning=`squeue -h -M $cluster -p $part --job=$jobId --state='R' | grep -v CLUSTER | wc -l`
+  sleep 1s
+  echo -n "."
+  nsleeps=`expr $nsleeps + 1`
+  if [ "$nsleeps" == "60" ]; then
+    if [ "$STIMES" == "" ]; then
+      echo " "
+    else
+      stimes -M $cluster -p $part -j $jobId | grep "^$jobId" | awk '{ printf("Session will start in %s %s\n", $10, $11); }'
+    fi
+    nsleeps=0
+  fi
+done
+echo ""
+
+# determine host name of compute nodes
+echo ""
+echo -n "Determining host name of compute nodes ... "
+nodelist=`squeue -h -M $cluster -p $part --job=$jobId | grep -v CLUSTER | awk '{ print $8 }' | nodeset -e -S,`
+echo "$nodelist"
+
+if [ "$nodelist" == "" ]; then
+  echo "Empty nodelist - canceling job and aborting script!"
+  scancel -M $cluster -p $part $jobId
+  exit
+fi
+
+# create hosts file
+echo "Creating COMSOL hosts file named $workdir/combatch.hosts.$jobId"
+echo $nodelist | tr ',' '\n' > $workdir/combatch.hosts.$jobId
+cp $workdir/combatch.hosts.$jobId $COMBATCH_CSL_ROOT_DIR/$user/combatch.hosts
+
+# create variables file --- passed onto the app builder
+echo "CCRhostfile,$workdir/combatch.hosts.$jobId" > $COMBATCH_VARS_FILE
+echo "CCRnodes,$nodes" >> $COMBATCH_VARS_FILE
+echo "CCRdirectory,$workdir" >> $COMBATCH_VARS_FILE
+echo "CCRcomsniff,$COMBATCH_HOME/bin/comsniff" >> $COMBATCH_VARS_FILE
+
+# launch primary server on head compute node
+pid=$$
+headnode=`echo $nodelist | cut -d, -f1`
+echo ""
+echo "Launching primary server on $headnode ..."
+( ssh -X $headnode \
+"\
+  export COMBATCH_VARS_FILE=$workdir/combatch_vars.$$;\
+  export PATH=$PATH; export COMSOL=$COMSOL; export _JAVA_OPTIONS=$_JAVA_OPTIONS;\
+  (comsol server -silent -login never > $workdir/server.log.$pid 2>&1) &\
+" ) & 
+
+# retrieve port number
+echo ""
+if [ "$port" == "" ]; then
+  echo "Waiting for server port assignment ... "
+  bDone=0
+  while [ "$bDone" == "0" ]; do
+    bDone=`grep port $workdir/server.log.$pid 2>/dev/null |wc -l`
+    echo -n "."
+    sleep 1s
+  done
+  port=`grep port $workdir/server.log.$pid | sed 's/^.* port //g' | awk '{ printf("%d", $1);}'`
+  echo ""
+fi
+echo "port = $port"
+
+if [ "$port" == "0" ]; then
+  echo "An invalid port was selected! Defaulting to $COMBATCH_DEFAULT_PORT"
+  port=$COMBATCH_DEFAULT_PORT
+fi
+
+# determine which firefox profile to use
+bOkToRunFirefox=0
+for i in 1 2 3 4; do
+  myprof=$user$i
+  profdir=`ls /user/$user/.mozilla/firefox | grep $myprof 2>/dev/null`
+  if [ "$profdir" == "" ]; then
+    echo "Creating new firefox profile! ($myprof)"
+    firefox -CreateProfile $myprof
+    profdir=`ls /user/$user/.mozilla/firefox | grep $myprof 2>/dev/null`    
+  else
+    echo "Re-Creating firefox profile! ($myprof)"
+    rm -Rf /user/$user/.mozilla/firefox/$profdir
+    firefox -CreateProfile $myprof
+    profdir=`ls /user/$user/.mozilla/firefox | grep $myprof 2>/dev/null`
+  fi   
+  profdir=/user/$user/.mozilla/firefox/$profdir
+  bInUse=`ls -la $profdir | grep " lock ->" | wc -l`
+  if [ "$bInUse" == "0" ]; then
+    bOkToRunFirefox=1
+    break
+  fi
+done
+
+if [ "$bOkToRunFirefox" == "0" ]; then
+  echo "Not able to launch firefox - no profiles are available!"
+  echo "abort" > $workdir/browser.done.$pid
+else
+  # launch broswer on head compute node
+  echo ""
+  echo "Launching comsol client via browser (profile = $myprof) ..."
+( ssh -X $headnode \
+"\
+  export COMBATCH_VARS_FILE=$workdir/combatch_vars.$$;\
+  export PATH=$PATH; export COMSOL=$COMSOL; export _JAVA_OPTIONS=$_JAVA_OPTIONS;\
+  firefox -no-remote -P $myprof http://localhost:$port ;
+  echo "done" > $workdir/browser.done.$pid\
+" ) &
+
+  # create reconnect script
+  echo "Creating script for reconnecting to browser ($workdir/reconnect_${jobId}.sh)"
+  echo '#!/bin/bash' > $workdir/reconnect_${jobId}.sh
+  echo "ssh -X $headnode \"export COMBATCH_VARS_FILE=$workdir/combatch_vars.$$; export PATH=$PATH; export COMSOL=$COMSOL; export _JAVA_OPTIONS=$_JAVA_OPTIONS; firefox -no-remote -P $myprof http://localhost:$port; echo \"done\" > $workdir/browser.done.$pid\"" \
+>> $workdir/reconnect_${jobId}.sh
+  chmod ug+x $workdir/reconnect_${jobId}.sh
+ 
+  # wait for browser session to be closed
+  echo ""
+  echo "Waiting for browser to close ..."
+fi
+
+nwaits=0
+nmins=0
+while [ ! -f $workdir/browser.done.$pid ]; do
+   sleep 1s
+   if [ "$nwaits" == 60 ]; then
+     # echo -n "."
+     nmins=`expr $nmins + 1`
+     echo "Elapsed Time = $nmins minutes"
+     nwaits=0
+   else
+     nwaits=`expr $nwaits + 1`
+   fi
+done
+echo ""
+
+# cancel job
+if [ "$jobId" != "" ]; then
+  echo ""
+  echo "Canceling job ..."
+  scancel -M $cluster -p $part $jobId
+fi
+
+# wait for job to finish
+echo ""
+echo "Waiting for job ($jobId) to finish ..."
+bRunning=1
+while [ "$bRunning" == "1" ]; do
+  bRunning=`squeue -h -M $cluster -p $part --job=$jobId | grep -v CLUSTER | wc -l`
+  sleep 1s
+  echo -n "."
+done
+echo ""
+
+# cleanup temporary files
+rm -f slurm-${jobId}.out
+rm -f $workdir/secondary_server.log.*.$pid
+rm -f $workdir/server.log.$pid
+rm -f $workdir/browser.done.$pid
+rm -f $workdir/combatch.hosts.$jobId
+
